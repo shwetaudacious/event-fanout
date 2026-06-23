@@ -290,5 +290,6 @@ make up
 ## Next Steps
 
 - [Architecture](architecture.md) — ingest → fanout → retry → audit diagrams
+- [Delivery Guarantees](delivery-guarantees.md) — at-least-once semantics and failure conditions
 - [Project Details](project-details.md) — config, API reference, data model
 - [DOKS Deployment](doks-deployment.md) — production deploy to DigitalOcean Kubernetes

@@ -10,7 +10,9 @@ DOCKER_REGISTRY=ghcr.io/shwetaudacious
 help:
 	@echo "Available targets:"
 	@echo "  build             - Build binaries"
-	@echo "  test              - Run tests"
+	@echo "  test              - Run unit tests"
+	@echo "  test-integration  - Run integration tests (requires Postgres + Redis)"
+	@echo "  test-all          - Run unit + integration tests"
 	@echo "  test-coverage     - Run tests with coverage"
 	@echo "  lint              - Run linter"
 	@echo "  fmt               - Format code"
@@ -28,7 +30,12 @@ build:
 	@echo "✅ Binaries built successfully"
 
 test:
-	$(GO) test -v -race ./...
+	$(GO) test -v -race $$(go list ./... | grep -v /tests/integration)
+
+test-integration:
+	$(GO) test -v -tags=integration ./tests/integration/...
+
+test-all: test test-integration
 
 test-coverage:
 	$(GO) test -v -race -coverprofile=coverage.out ./...

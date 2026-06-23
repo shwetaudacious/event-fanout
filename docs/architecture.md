@@ -1,32 +1,60 @@
 # Architecture
 
-System design for the Event Fanout Service — from event ingest through subscriber matching, fanout, retry loop, and delivery audit.
+System design for the Event Fanout Service — full path from event ingest through subscriber matching, fanout, retry loop, and delivery audit store.
 
-## System Context
+## Full Architecture Flow
+
+The diagram below maps every stage in order. Numbers match the step descriptions.
 
 ```mermaid
 flowchart TB
-    Client[ClientApps] --> API[HTTPServer]
-    API --> PG[(PostgreSQL)]
-    API --> Redis[(RedisQueue)]
-    Worker[FanoutWorker] --> Redis
-    Worker --> PG
-    Worker --> Webhooks[SubscriberWebhooks]
-    Client --> Audit[AuditAPI]
-    Audit --> PG
+    subgraph ingest [1_EventIngestion]
+        C[ClientApp] -->|POST /api/v1/events| API[HTTPServer]
+        API -->|INSERT| EventsTable[(events table)]
+        API -->|LPUSH events:queue| RedisQ[(Redis Queue)]
+    end
+
+    subgraph fanout [2_3_FanoutAndMatching]
+        RedisQ -->|BRPOP| Worker[FanoutWorker]
+        Worker -->|SELECT active| SubsTable[(subscriptions table)]
+        Worker --> Matcher[RulesMatcher]
+        Matcher -->|match| Worker
+    end
+
+    subgraph delivery [4_5_DeliveryAndRetry]
+        Worker -->|INSERT pending| AttemptsTable[(delivery_attempts table)]
+        Worker -->|POST JSON| Webhook[SubscriberWebhook]
+        Webhook -->|2xx| Worker
+        Webhook -->|5xx/timeout| RetryLoop[RetryLoop]
+        RetryLoop -->|exponential backoff| Worker
+        Webhook -->|4xx| FailedFinal[failed no retry]
+        Worker -->|UPDATE status| AttemptsTable
+    end
+
+    subgraph audit [6_DeliveryAuditStore]
+        AttemptsTable --> AuditAPI[AuditAPI]
+        EventsTable --> AuditAPI
+        SubsTable --> AuditAPI
+        Client2[ClientApp] -->|GET .../audit| AuditAPI
+    end
 ```
 
-| Component | Role |
-|-----------|------|
-| **HTTP Server** | Ingest events, manage subscriptions, serve audit queries |
-| **PostgreSQL** | Durable store: events, subscriptions, delivery_attempts |
-| **Redis** | Async queue decoupling ingestion from fanout |
-| **Fanout Worker** | Consumes queue, matches rules, delivers webhooks, retries |
-| **Audit API** | Query delivery history per event or subscription |
+### Step-by-step
+
+| Step | Stage | Component | Action | Store |
+|------|-------|-----------|--------|-------|
+| 1 | **Ingest** | HTTP Server | Validate `type`, `source`, `payload`; persist event | `events` (PostgreSQL) |
+| 2 | **Enqueue** | HTTP Server | Push event JSON to Redis list | `events:queue` (Redis) |
+| 3 | **Consume** | Worker | Block on `BRPOP`; deserialize event | — |
+| 4 | **Match** | Rules Matcher | Load active subscriptions; filter by type, source, payload rules | `subscriptions` (read) |
+| 5 | **Deliver** | Fanout Service | Create `delivery_attempts` row (`pending`); POST to webhook URL | `delivery_attempts` (write) |
+| 6 | **Record** | Fanout Service | On 2xx → `success`; on 5xx/timeout → schedule retry; on 4xx → `failed` | `delivery_attempts` (update) |
+| 7 | **Retry loop** | Worker | Poll `next_retry_at`; re-POST with backoff until success or max retries | `delivery_attempts` (update) |
+| 8 | **Audit** | Audit API | Join event + attempts + subscription webhook URL; return history | `delivery_attempts` (read) |
 
 ---
 
-## End-to-End Flow
+## End-to-End Sequence
 
 ```mermaid
 sequenceDiagram
@@ -35,30 +63,37 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Redis as RedisQueue
     participant Worker
+    participant Matcher as RulesMatcher
     participant Webhook
+    participant Audit as AuditAPI
 
     Client->>API: POST /api/v1/events
-    API->>DB: INSERT event
+    API->>DB: INSERT INTO events
     API->>Redis: LPUSH events:queue
     API-->>Client: 201 Created
 
     Worker->>Redis: BRPOP event
-    Worker->>DB: SELECT active subscriptions
-    Worker->>Worker: Evaluate filter rules
-    Worker->>DB: INSERT delivery_attempt (pending)
-    Worker->>Webhook: POST payload
-    alt 2xx success
-        Worker->>DB: UPDATE status=success
-    else 5xx / timeout
-        Worker->>DB: UPDATE status=failed, schedule next_retry_at
-        Worker->>Webhook: Retry with exponential backoff
-    else 4xx client error
-        Worker->>DB: UPDATE status=failed (no retry)
+    Worker->>DB: SELECT subscriptions WHERE active
+    Worker->>Matcher: Matches(event, subscription)
+    Matcher-->>Worker: true/false per sub
+
+    loop Each matching subscription
+        Worker->>DB: INSERT delivery_attempt (pending)
+        Worker->>Webhook: POST event payload
+        alt 2xx
+            Worker->>DB: UPDATE status=success, http_code
+        else 5xx / timeout
+            Worker->>DB: UPDATE status=failed, next_retry_at
+            Note over Worker,Webhook: Retry loop with backoff
+            Worker->>Webhook: POST (retry)
+        else 4xx
+            Worker->>DB: UPDATE status=failed (permanent)
+        end
     end
 
-    Client->>API: GET /api/v1/events/{id}/audit
-    API->>DB: SELECT delivery_attempts
-    API-->>Client: Audit response
+    Client->>Audit: GET /api/v1/events/{id}/audit
+    Audit->>DB: SELECT delivery_attempts + event
+    Audit-->>Client: attempts with timestamps, http_code, status
 ```
 
 ---
@@ -101,16 +136,29 @@ flowchart TB
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Create attempt
+    [*] --> pending: Worker creates attempt
     pending --> success: Webhook 2xx
-    pending --> failed: Webhook 5xx/timeout
-    failed --> pending: Retry scheduled (next_retry_at)
-    failed --> failed: Max retries exceeded
-    pending --> failed: Webhook 4xx (no retry)
+    pending --> failed_retryable: 5xx / timeout
+    failed_retryable --> pending: next_retry_at reached
+    failed_retryable --> success: Retry returns 2xx
+    failed_retryable --> failed_final: MAX_DELIVERY_RETRIES exceeded
+    pending --> failed_final: Webhook 4xx
     success --> [*]
+    failed_final --> [*]
 ```
 
-Backoff formula: `BASE_RETRY_DELAY_SECONDS × 2^(attempt-1)`
+Backoff: `BASE_RETRY_DELAY_SECONDS × 2^(attempt-1)`
+
+---
+
+## Data Stores
+
+| Store | Table / Key | Written by | Read by |
+|-------|-------------|------------|---------|
+| PostgreSQL | `events` | Ingest API | Audit API, Worker |
+| PostgreSQL | `subscriptions` | Subscription API | Worker (matcher) |
+| PostgreSQL | `delivery_attempts` | Worker | Audit API, Retry poller |
+| Redis | `events:queue` | Ingest API | Worker |
 
 ---
 
@@ -125,21 +173,17 @@ flowchart LR
     Server --> Redis[(Redis)]
     Worker --> PG
     Worker --> Redis
+    Worker --> Webhooks[ExternalWebhooks]
 ```
 
 ### Production (DOKS)
 
-See [DOKS Deployment](doks-deployment.md) for managed PostgreSQL, Redis, LoadBalancer, and GitHub Actions deploy pipeline.
-
----
-
-## Delivery Guarantees
-
-**At-least-once** per matching subscriber. See [README — Delivery Guarantees](../README.md#delivery-guarantees).
+See [DOKS Deployment](doks-deployment.md).
 
 ---
 
 ## Related
 
+- [Delivery Guarantees](delivery-guarantees.md)
 - [Project Details](project-details.md)
 - [Getting Started](getting-started.md)

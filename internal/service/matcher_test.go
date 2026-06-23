@@ -107,6 +107,26 @@ func TestRulesMatcher_NoMatch(t *testing.T) {
 	}
 }
 
+func TestRulesMatcher_InOperator(t *testing.T) {
+	matcher := NewRulesMatcher()
+	event := &models.Event{
+		Payload: json.RawMessage(`{"region":"us-east"}`),
+	}
+	sub := &models.Subscription{
+		Rules: json.RawMessage(`{
+			"payload_rules":[{"path":"$.region","op":"in","value":["us-east","us-west"]}]
+		}`),
+	}
+
+	match, err := matcher.Matches(event, sub)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !match {
+		t.Fatal("expected in-operator match")
+	}
+}
+
 func TestRulesMatcher_RegexPayloadRule(t *testing.T) {
 	matcher := NewRulesMatcher()
 	event := &models.Event{

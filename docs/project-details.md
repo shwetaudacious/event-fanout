@@ -163,15 +163,20 @@ Operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `regex`.
 
 ## Delivery Guarantees
 
-**At-least-once** per matching subscriber.
+**Per-subscriber: at-least-once.** See the full specification in **[Delivery Guarantees](delivery-guarantees.md)**.
 
-1. Event persisted to PostgreSQL before Redis enqueue
-2. Worker creates one `delivery_attempts` row per event/subscription pair
-3. Failed deliveries retried with exponential backoff: `BASE_RETRY_DELAY × 2^(attempt-1)`
-4. HTTP 4xx → failed permanently (no retry)
-5. HTTP 5xx / timeout → retried until `MAX_DELIVERY_RETRIES`
+| Semantic | This service |
+|----------|--------------|
+| At-least-once | Yes — retries until 2xx or max retries; duplicates possible |
+| At-most-once | No — retries re-POST on transient failure |
+| Exactly-once | No — subscribers must deduplicate by event `id` |
 
-Subscribers must deduplicate by event `id` in the webhook payload.
+Quick reference:
+
+1. Event persisted to PostgreSQL **before** Redis enqueue (non-atomic across both)
+2. One `delivery_attempts` row per `(event_id, subscription_id)`
+3. Backoff: `BASE_RETRY_DELAY × 2^(attempt-1)`; 4xx = no retry; 5xx/timeout = retry
+4. Audit: `GET /api/v1/events/{id}/audit` and `GET /api/v1/subscriptions/{id}/audit`
 
 ## Makefile Targets
 
@@ -187,11 +192,11 @@ Subscribers must deduplicate by event `id` in the webhook payload.
 
 ## Testing
 
-| Suite | Command | Requires |
-|-------|---------|----------|
-| Unit | `make test` | Nothing |
-| Integration | `go test -tags=integration ./tests/integration/...` | Postgres + Redis |
-| CI | GitHub Actions on push | Both (services in workflow) |
+| Suite | Command | Scenarios covered |
+|-------|---------|-------------------|
+| Unit | `make test` | Rules matcher (type, source, wildcards, payload ops), webhook client, Redis queue, audit views |
+| Integration | `make test-integration` | E2E fanout, 5xx retry, 4xx no-retry, non-match skip, payload filter, subscription CRUD, event + sub audit |
+| CI | GitHub Actions on push | Both jobs in [`.github/workflows/test.yml`](../.github/workflows/test.yml) |
 
 ## CI/CD Pipelines
 
