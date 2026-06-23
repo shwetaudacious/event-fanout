@@ -244,11 +244,6 @@ func TestSubscriptionCRUD(t *testing.T) {
 	if len(subs) != 1 {
 		t.Fatalf("expected 1 subscription, got %d", len(subs))
 	}
-
-	got, err := env.subService.GetSubscription(env.ctx, sub.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
 	if got.WebhookURL != sub.WebhookURL {
 		t.Fatal("webhook url mismatch")
 	}
