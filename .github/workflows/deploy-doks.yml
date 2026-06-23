@@ -36,6 +36,7 @@ jobs:
           helm upgrade --install ${{ env.RELEASE_NAME }} ./helm/eventfanout \
             --namespace ${{ env.NAMESPACE }} \
             --create-namespace \
+            -f ./helm/eventfanout/values-doks.yaml \
             --set image.repository=ghcr.io/${{ github.repository }} \
             --set image.tag=latest \
             --set secrets.databaseURL="${{ secrets.DATABASE_URL }}" \

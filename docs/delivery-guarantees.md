@@ -82,12 +82,12 @@ sequenceDiagram
     Client->>API: POST /events
     API->>DB: INSERT event
     Note over API,DB: Ingest durable here
-    API->>Redis: LPUSH queue
+    API->>Redis: XADD events:stream
     Note over API,Redis: Gap if Redis fails after DB
     API-->>Client: 201 or 500
 
-    Worker->>Redis: BRPOP event
-    Note over Worker,Redis: Message removed from queue
+    Worker->>Redis: XREADGROUP (fanout-workers)
+    Note over Worker,Redis: Pending until XACK
     Worker->>Webhook: POST (attempt 1)
     alt 2xx
         Worker->>DB: status=success
@@ -117,8 +117,8 @@ sequenceDiagram
 
 | Failure | Effect |
 |---------|--------|
-| Worker down | Events accumulate in Redis queue; delivered when worker resumes |
-| Worker crash after `BRPOP` | Event removed from Redis; if processing incomplete, event may not fanout unless replayed from DB (not automated today) |
+| Worker down | Events accumulate in Redis stream; delivered when worker resumes |
+| Worker crash before `XACK` | Message stays in pending list; reclaimed via `XAUTOCLAIM` by another worker |
 | No matching subscriptions | Event stored; no `delivery_attempts` rows created |
 | Rule evaluation error | Subscription skipped for that event; logged as warning |
 

@@ -99,10 +99,13 @@ config:
   baseRetryDelaySeconds: 5
   webhookTimeoutSeconds: 30
   webhookMaxBodyBytes: 1048576
+  redisStreamKey: events:stream
+  redisConsumerGroup: fanout-workers
 
 # Connection secrets (override for DOKS with managed DB/Redis URLs)
 secrets:
   create: true
+  # Use rediss:// for DigitalOcean Managed Redis (TLS)
   databaseURL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
   redisURL: "redis://redis:6379"
 

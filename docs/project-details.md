@@ -24,7 +24,7 @@ internal/delivery/       Webhook HTTP client
 internal/worker/         Background processor loop
 internal/service/        Event, subscription, fanout, matcher logic
 internal/repository/     PostgreSQL data access
-internal/queue/          Redis list queue (events:queue)
+internal/queue/          Redis Streams queue (events:stream, consumer group fanout-workers)
 internal/redisutil/      REDIS_URL parsing
 migrations/              PostgreSQL schema
 helm/eventfanout/        DOKS Helm chart

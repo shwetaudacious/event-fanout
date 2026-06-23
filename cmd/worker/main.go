@@ -49,7 +49,7 @@ func main() {
 	subRepo := repository.NewSubscriptionRepository(db)
 	deliveryRepo := repository.NewDeliveryRepository(db)
 
-	redisQueue, err := queue.NewRedisQueue(redisClient, logger)
+	redisQueue, err := queue.NewRedisQueue(redisClient, logger, cfg.QueueConfig())
 	if err != nil {
 		logger.Fatal("failed to create Redis queue", zap.Error(err))
 	}

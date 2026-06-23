@@ -78,7 +78,7 @@ func setupEnv(t *testing.T) *testEnv {
 	eventRepo := repository.NewEventRepository(pool)
 	subRepo := repository.NewSubscriptionRepository(pool)
 	deliveryRepo := repository.NewDeliveryRepository(pool)
-	redisQueue, err := queue.NewRedisQueue(redisClient, logger)
+	redisQueue, err := queue.NewRedisQueue(redisClient, logger, queue.DefaultConfig())
 	if err != nil {
 		t.Fatalf("queue: %v", err)
 	}

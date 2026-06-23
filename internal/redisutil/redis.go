@@ -1,6 +1,7 @@
 package redisutil
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 )
 
 // NewClient creates a Redis client from a redis:// or rediss:// URL.
+// Use rediss:// for DigitalOcean Managed Redis (TLS required).
 func NewClient(redisURL string) (*redis.Client, error) {
 	if redisURL == "" {
 		redisURL = "redis://localhost:6379"
@@ -31,7 +33,7 @@ func NewClient(redisURL string) (*redis.Client, error) {
 	}
 
 	if u.Scheme == "rediss" {
-		opts.TLSConfig = nil
+		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
 	if db := strings.TrimPrefix(u.Path, "/"); db != "" {

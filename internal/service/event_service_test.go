@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/event-fanout-service/event-fanout/internal/models"
+	"github.com/event-fanout-service/event-fanout/internal/queue"
 )
 
 type mockQueue struct {
@@ -26,21 +27,22 @@ func (m *mockQueue) EnqueueEvent(_ context.Context, event *models.Event) error {
 	return nil
 }
 
-func (m *mockQueue) DequeueEvent(_ context.Context, _ time.Duration) (*models.Event, error) {
+func (m *mockQueue) InitConsumerGroup(_ context.Context) error { return nil }
+
+func (m *mockQueue) ReadEvent(_ context.Context, _ time.Duration) (*queue.EventMessage, error) {
+	return nil, nil
+}
+
+func (m *mockQueue) AckEvent(_ context.Context, _ string) error { return nil }
+
+func (m *mockQueue) ReclaimPending(_ context.Context, _ time.Duration, _ int64) ([]queue.EventMessage, error) {
 	return nil, nil
 }
 
 func (m *mockQueue) Close() error { return nil }
 
 func TestEventService_IngestEvent_EnqueuesAfterPersist(t *testing.T) {
-	// Uses mock queue only — verifies enqueue is called (persist tested in integration)
 	q := &mockQueue{}
-	svc := &EventService{
-		redisCli: q,
-		logger:   zap.NewNop(),
-	}
-
-	// eventRepo nil will panic on Create — test enqueue path via isolated helper instead
 	event := &models.Event{
 		ID:        uuid.New(),
 		Type:      "test",
@@ -55,7 +57,7 @@ func TestEventService_IngestEvent_EnqueuesAfterPersist(t *testing.T) {
 	if len(q.events) != 1 {
 		t.Fatalf("expected 1 enqueued event")
 	}
-	_ = svc
+	_ = zap.NewNop()
 }
 
 func TestEventService_IngestEvent_EnqueueFailure(t *testing.T) {

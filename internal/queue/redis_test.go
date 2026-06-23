@@ -14,17 +14,31 @@ import (
 	"github.com/event-fanout-service/event-fanout/internal/models"
 )
 
-func TestRedisQueue_EnqueueDequeue(t *testing.T) {
+func testQueue(t *testing.T) (*RedisQueue, *miniredis.Miniredis) {
+	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("miniredis: %v", err)
 	}
-	defer mr.Close()
-
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	q, err := NewRedisQueue(client, zap.NewNop())
+	q, err := NewRedisQueue(client, zap.NewNop(), Config{
+		StreamKey:     "test:stream",
+		ConsumerGroup: "test-group",
+		ConsumerName:  "test-consumer",
+	})
 	if err != nil {
 		t.Fatalf("new queue: %v", err)
+	}
+	return q, mr
+}
+
+func TestRedisStream_EnqueueReadAck(t *testing.T) {
+	q, mr := testQueue(t)
+	defer mr.Close()
+
+	ctx := context.Background()
+	if err := q.InitConsumerGroup(ctx); err != nil {
+		t.Fatalf("init group: %v", err)
 	}
 
 	event := &models.Event{
@@ -34,56 +48,49 @@ func TestRedisQueue_EnqueueDequeue(t *testing.T) {
 		Payload:   json.RawMessage(`{"k":"v"}`),
 		CreatedAt: time.Now(),
 	}
-
-	ctx := context.Background()
 	if err := q.EnqueueEvent(ctx, event); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	got, err := q.DequeueEvent(ctx, time.Second)
+	msg, err := q.ReadEvent(ctx, time.Second)
 	if err != nil {
-		t.Fatalf("dequeue: %v", err)
+		t.Fatalf("read: %v", err)
 	}
-	if got == nil {
-		t.Fatal("expected event")
+	if msg == nil || msg.Event.ID != event.ID {
+		t.Fatalf("unexpected message: %#v", msg)
 	}
-	if got.ID != event.ID {
-		t.Fatalf("id mismatch: %s vs %s", got.ID, event.ID)
-	}
-	if got.Type != event.Type {
-		t.Fatalf("type mismatch")
+
+	if err := q.AckEvent(ctx, msg.StreamID); err != nil {
+		t.Fatalf("ack: %v", err)
 	}
 }
 
-func TestRedisQueue_DequeueTimeout(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
-	}
+func TestRedisStream_ReadTimeout(t *testing.T) {
+	q, mr := testQueue(t)
 	defer mr.Close()
 
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	q, _ := NewRedisQueue(client, zap.NewNop())
-
-	got, err := q.DequeueEvent(context.Background(), 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("dequeue: %v", err)
+	ctx := context.Background()
+	if err := q.InitConsumerGroup(ctx); err != nil {
+		t.Fatalf("init group: %v", err)
 	}
-	if got != nil {
+
+	msg, err := q.ReadEvent(ctx, time.Second)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if msg != nil {
 		t.Fatal("expected nil on timeout")
 	}
 }
 
-func TestRedisQueue_FIFOOrder(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("miniredis: %v", err)
-	}
+func TestRedisStream_FIFOOrder(t *testing.T) {
+	q, mr := testQueue(t)
 	defer mr.Close()
 
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	q, _ := NewRedisQueue(client, zap.NewNop())
 	ctx := context.Background()
+	if err := q.InitConsumerGroup(ctx); err != nil {
+		t.Fatalf("init group: %v", err)
+	}
 
 	first := &models.Event{ID: uuid.New(), Type: "first", Source: "s", CreatedAt: time.Now()}
 	second := &models.Event{ID: uuid.New(), Type: "second", Source: "s", CreatedAt: time.Now()}
@@ -91,8 +98,27 @@ func TestRedisQueue_FIFOOrder(t *testing.T) {
 	_ = q.EnqueueEvent(ctx, first)
 	_ = q.EnqueueEvent(ctx, second)
 
-	got, err := q.DequeueEvent(ctx, time.Second)
-	if err != nil || got.Type != "first" {
-		t.Fatalf("expected FIFO order (first out first), got %#v err=%v", got, err)
+	msg, err := q.ReadEvent(ctx, time.Second)
+	if err != nil || msg.Event.Type != "first" {
+		t.Fatalf("expected first event, got %#v err=%v", msg, err)
+	}
+	_ = q.AckEvent(ctx, msg.StreamID)
+
+	msg, err = q.ReadEvent(ctx, time.Second)
+	if err != nil || msg.Event.Type != "second" {
+		t.Fatalf("expected second event, got %#v err=%v", msg, err)
+	}
+}
+
+func TestRedisStream_InitConsumerGroupIdempotent(t *testing.T) {
+	q, mr := testQueue(t)
+	defer mr.Close()
+
+	ctx := context.Background()
+	if err := q.InitConsumerGroup(ctx); err != nil {
+		t.Fatalf("first init: %v", err)
+	}
+	if err := q.InitConsumerGroup(ctx); err != nil {
+		t.Fatalf("second init should be idempotent: %v", err)
 	}
 }

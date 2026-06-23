@@ -97,8 +97,8 @@ flowchart LR
 | Step | Stage | Store updated |
 |------|-------|---------------|
 | 1 | REST ingest → validate → persist | `events` (PostgreSQL) |
-| 2 | Enqueue for async processing | `events:queue` (Redis) |
-| 3 | Worker dequeues event | — |
+| 2 | Enqueue for async processing | `events:stream` (Redis Streams) |
+| 3 | Worker reads from consumer group | `fanout-workers` |
 | 4 | Match against subscription rules | `subscriptions` (read) |
 | 5 | POST to webhook; record attempt | `delivery_attempts` |
 | 6 | Retry with backoff on 5xx/timeout | `delivery_attempts` |
@@ -177,20 +177,22 @@ CI runs both jobs on every push — see [`.github/workflows/test.yml`](.github/w
 
 ## DOKS Deployment
 
+Production deploys to **DigitalOcean Kubernetes** with **Managed PostgreSQL** and **Managed Redis** (`rediss://` TLS). Fanout uses **Redis Streams** (`events:stream`, consumer group `fanout-workers`).
+
 ```bash
 helm upgrade --install event-fanout ./helm/eventfanout \
   -n event-fanout --create-namespace \
+  -f ./helm/eventfanout/values-doks.yaml \
   --set secrets.databaseURL="$DATABASE_URL" \
   --set secrets.redisURL="$REDIS_URL"
 ```
 
-See [DOKS Deployment](docs/doks-deployment.md). Required GitHub secrets: `DIGITALOCEAN_ACCESS_TOKEN`, `DATABASE_URL`, `REDIS_URL`.
+See [DOKS Deployment](docs/doks-deployment.md). Required GitHub secrets: `DIGITALOCEAN_ACCESS_TOKEN`, `DATABASE_URL`, `REDIS_URL` (use `rediss://` for managed Redis).
 
 ## What We Sacrifice for Simplicity vs. What We'd Harden Next
 
 | What we sacrifice now | Why it's acceptable for MVP | What we'd harden next |
 |-----------------------|------------------------------|----------------------|
-| **Redis list queue** (not Streams) | Simple LPUSH/BRPOP works for single-worker and low volume | Redis Streams + consumer groups for horizontal scaling and at-least-once dequeue |
 | **No transactional outbox** | Faster to ship; ingest is durable to Postgres | Outbox table + relay for atomic DB+queue writes |
 | **At-least-once delivery** | Industry-standard trade-off; simpler than exactly-once | Idempotency keys + dedup store for effectively-once |
 | **No webhook HMAC signing** | Subscribers trust network path | HMAC-SHA256 signature headers on every POST |

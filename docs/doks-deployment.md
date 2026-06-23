@@ -1,11 +1,11 @@
 # DOKS Deployment Guide
 
-Deploy the Event Fanout Service to **DigitalOcean Kubernetes (DOKS)** using Helm and GitHub Actions.
+Deploy the Event Fanout Service to **DigitalOcean Kubernetes (DOKS)** using Helm and GitHub Actions. Production uses **DigitalOcean Managed PostgreSQL** and **DigitalOcean Managed Redis** with **Redis Streams** as the fanout backbone.
 
 ## Prerequisites
 
 - DigitalOcean account with a DOKS cluster (`event-fanout-cluster` or update the workflow)
-- Managed PostgreSQL and Redis (DigitalOcean Managed Databases recommended)
+- Managed PostgreSQL 15 and Redis 7 in the same VPC/region as the cluster
 - Container image published to GHCR (`ghcr.io/shwetaudacious/event-fanout`)
 - `doctl`, `kubectl`, and `helm` installed locally for manual deploys
 
@@ -19,54 +19,98 @@ flowchart TB
         Worker[WorkerDeployment]
     end
     PG[(ManagedPostgreSQL)]
-    Redis[(ManagedRedis)]
+    Redis[(ManagedRedisStreams)]
     GHCR[GHCRImageRegistry]
 
     Internet --> LB
     LB --> Server
     Server --> PG
-    Server --> Redis
+    Server -->|XADD events:stream| Redis
     Worker --> PG
-    Worker --> Redis
+    Worker -->|XREADGROUP / XACK| Redis
     Worker --> Webhooks[ExternalWebhooks]
     GHCR --> Server
     GHCR --> Worker
 ```
 
+The server persists events to Postgres, then enqueues to the Redis stream `events:stream`. Worker pods join consumer group `fanout-workers` (one consumer name per pod) for at-least-once fanout with pending-message reclaim on crash.
+
 ## 1. Provision Infrastructure
 
-1. Create a DOKS cluster in the DigitalOcean control panel.
-2. Create managed PostgreSQL 15 and Redis 7 instances in the same VPC/region.
-3. Note connection strings for both databases.
+### DOKS cluster
+
+```bash
+doctl kubernetes cluster create event-fanout-cluster \
+  --region nyc1 \
+  --version 1.31.2-do.0 \
+  --node-pool "name=workers;size=s-2vcpu-4gb;count=2"
+```
+
+### Managed PostgreSQL
+
+1. In the DigitalOcean control panel: **Databases → Create → PostgreSQL 15**.
+2. Choose the same region/VPC as your cluster.
+3. Create database `eventfanout` (or use default and set `dbname` in the URL).
+4. Copy the **connection string** with `sslmode=require` for private networking.
+
+### Managed Redis (Streams backbone)
+
+1. **Databases → Create → Redis 7**.
+2. Same region/VPC as DOKS and Postgres.
+3. Enable **TLS** and use the **`rediss://`** connection URL (note the double `s`).
+4. Redis Streams (`XADD`, `XREADGROUP`, `XACK`, `XAUTOCLAIM`) are supported on DO Managed Redis.
+
+Example URLs (replace with values from the control panel):
+
+```text
+DATABASE_URL=postgres://doadmin:PASSWORD@private-db-host:25060/eventfanout?sslmode=require
+REDIS_URL=rediss://default:PASSWORD@private-redis-host:25061
+```
 
 ## 2. Configure GitHub Secrets
 
-In your repository settings, add:
+In repository **Settings → Secrets and variables → Actions**:
 
 | Secret | Description |
 |--------|-------------|
 | `DIGITALOCEAN_ACCESS_TOKEN` | DO API token with Kubernetes read/write |
-| `DATABASE_URL` | Managed Postgres connection URL |
-| `REDIS_URL` | Managed Redis connection URL |
+| `DATABASE_URL` | Managed Postgres URL (`sslmode=require`) |
+| `REDIS_URL` | Managed Redis URL (`rediss://` for TLS) |
 
-## 3. Manual Helm Deploy
+Optional: create a GitHub **environment** named `production` with required reviewers before deploy.
+
+## 3. Run Database Migrations
+
+Apply schema before first deploy:
 
 ```bash
-# Authenticate to DOKS
+psql "$DATABASE_URL" -f migrations/001_init_schema.sql
+```
+
+## 4. Manual Helm Deploy
+
+```bash
 doctl kubernetes cluster kubeconfig save event-fanout-cluster
 
-# Deploy
 helm upgrade --install event-fanout ./helm/eventfanout \
   --namespace event-fanout \
   --create-namespace \
+  -f ./helm/eventfanout/values-doks.yaml \
   --set image.repository=ghcr.io/shwetaudacious/event-fanout \
   --set image.tag=latest \
   --set secrets.databaseURL="$DATABASE_URL" \
-  --set secrets.redisURL="$REDIS_URL" \
-  --set config.environment=production
+  --set secrets.redisURL="$REDIS_URL"
 ```
 
-## 4. Verify
+`values-doks.yaml` disables in-cluster Postgres/Redis, enables HPA, and sets stream defaults:
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `config.redisStreamKey` | `events:stream` | Stream key for fanout queue |
+| `config.redisConsumerGroup` | `fanout-workers` | Consumer group for workers |
+| `REDIS_CONSUMER_NAME` | Pod name (downward API) | Unique consumer per worker pod |
+
+## 5. Verify
 
 ```bash
 kubectl get pods -n event-fanout
@@ -82,13 +126,19 @@ kubectl port-forward -n event-fanout svc/event-fanout 8080:80
 curl http://localhost:8080/health
 ```
 
-## 5. Automated CI/CD Deploy
+Confirm stream activity (requires `redis-cli` with TLS to managed Redis):
 
-The repository includes:
+```bash
+redis-cli -u "$REDIS_URL" XINFO GROUPS events:stream
+```
 
-- `.github/workflows/test.yml` — unit + integration tests on push
-- `.github/workflows/build-push.yml` — builds and pushes image to GHCR on `main`
-- `.github/workflows/deploy-doks.yml` — deploys to DOKS after successful build
+## 6. Automated CI/CD Deploy
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `.github/workflows/test.yml` | Push | Unit + integration tests |
+| `.github/workflows/build-push.yml` | Push to `main` | Build and push image to GHCR |
+| `.github/workflows/deploy-doks.yml` | After successful build | Helm deploy with `values-doks.yaml` |
 
 Update `CLUSTER_NAME` in `deploy-doks.yml` if your cluster has a different name.
 
@@ -99,22 +149,15 @@ Update `CLUSTER_NAME` in `deploy-doks.yml` if your cluster has a different name.
 | `image.repository` | Container image |
 | `image.tag` | Image tag |
 | `secrets.databaseURL` | PostgreSQL connection string |
-| `secrets.redisURL` | Redis connection string |
+| `secrets.redisURL` | Redis connection string (`rediss://` in production) |
+| `config.redisStreamKey` | Redis stream key |
+| `config.redisConsumerGroup` | Consumer group name |
 | `config.maxDeliveryRetries` | Max webhook retry attempts |
 | `config.workerReplicas` | Worker pod count |
 | `autoscaling.enabled` | HPA for server pods |
 
-## Run Database Migrations
-
-Apply schema before first deploy:
-
-```bash
-psql "$DATABASE_URL" -f migrations/001_init_schema.sql
-```
-
-Or mount migrations as a Kubernetes Job in production pipelines.
-
 ## Related
 
 - [Architecture](architecture.md)
+- [Delivery guarantees](delivery-guarantees.md)
 - [Getting Started](getting-started.md)

@@ -61,6 +61,14 @@ spec:
                 secretKeyRef:
                   name: {{ include "event-fanout.fullname" . }}-redis
                   key: connection-url
+            - name: REDIS_STREAM_KEY
+              value: "{{ .Values.config.redisStreamKey }}"
+            - name: REDIS_CONSUMER_GROUP
+              value: "{{ .Values.config.redisConsumerGroup }}"
+            - name: REDIS_CONSUMER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           livenessProbe:
             httpGet:
               path: /health
@@ -149,6 +157,14 @@ spec:
                 secretKeyRef:
                   name: {{ include "event-fanout.fullname" . }}-redis
                   key: connection-url
+            - name: REDIS_STREAM_KEY
+              value: "{{ .Values.config.redisStreamKey }}"
+            - name: REDIS_CONSUMER_GROUP
+              value: "{{ .Values.config.redisConsumerGroup }}"
+            - name: REDIS_CONSUMER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}

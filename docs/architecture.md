@@ -11,11 +11,11 @@ flowchart TB
     subgraph ingest [1_EventIngestion]
         C[ClientApp] -->|POST /api/v1/events| API[HTTPServer]
         API -->|INSERT| EventsTable[(events table)]
-        API -->|LPUSH events:queue| RedisQ[(Redis Queue)]
+        API -->|XADD events:stream| RedisQ[(Redis Streams)]
     end
 
     subgraph fanout [2_3_FanoutAndMatching]
-        RedisQ -->|BRPOP| Worker[FanoutWorker]
+        RedisQ -->|XREADGROUP fanout-workers| Worker[FanoutWorker]
         Worker -->|SELECT active| SubsTable[(subscriptions table)]
         Worker --> Matcher[RulesMatcher]
         Matcher -->|match| Worker
@@ -44,8 +44,8 @@ flowchart TB
 | Step | Stage | Component | Action | Store |
 |------|-------|-----------|--------|-------|
 | 1 | **Ingest** | HTTP Server | Validate `type`, `source`, `payload`; persist event | `events` (PostgreSQL) |
-| 2 | **Enqueue** | HTTP Server | Push event JSON to Redis list | `events:queue` (Redis) |
-| 3 | **Consume** | Worker | Block on `BRPOP`; deserialize event | — |
+| 2 | **Enqueue** | HTTP Server | Append event JSON to Redis stream | `events:stream` (Redis Streams) |
+| 3 | **Consume** | Worker | `XREADGROUP` from `fanout-workers`; `XACK` after success | — |
 | 4 | **Match** | Rules Matcher | Load active subscriptions; filter by type, source, payload rules | `subscriptions` (read) |
 | 5 | **Deliver** | Fanout Service | Create `delivery_attempts` row (`pending`); POST to webhook URL | `delivery_attempts` (write) |
 | 6 | **Record** | Fanout Service | On 2xx → `success`; on 5xx/timeout → schedule retry; on 4xx → `failed` | `delivery_attempts` (update) |
@@ -69,10 +69,10 @@ sequenceDiagram
 
     Client->>API: POST /api/v1/events
     API->>DB: INSERT INTO events
-    API->>Redis: LPUSH events:queue
+    API->>Redis: XADD events:stream
     API-->>Client: 201 Created
 
-    Worker->>Redis: BRPOP event
+    Worker->>Redis: XREADGROUP (fanout-workers)
     Worker->>DB: SELECT subscriptions WHERE active
     Worker->>Matcher: Matches(event, subscription)
     Matcher-->>Worker: true/false per sub
@@ -158,7 +158,7 @@ Backoff: `BASE_RETRY_DELAY_SECONDS × 2^(attempt-1)`
 | PostgreSQL | `events` | Ingest API | Audit API, Worker |
 | PostgreSQL | `subscriptions` | Subscription API | Worker (matcher) |
 | PostgreSQL | `delivery_attempts` | Worker | Audit API, Retry poller |
-| Redis | `events:queue` | Ingest API | Worker |
+| Redis | `events:stream` | Ingest API (`XADD`) | Worker (`XREADGROUP` / `XACK`) |
 
 ---
 
