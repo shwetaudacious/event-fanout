@@ -105,11 +105,20 @@ func TestEndToEndFanout(t *testing.T) {
 		t.Fatal("timed out waiting for webhook delivery")
 	}
 
-	audit, err := eventService.GetEventAudit(ctx, event.ID, 10, 0)
-	if err != nil {
-		t.Fatalf("get audit: %v", err)
+	var audit *models.DeliveryAudit
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		audit, err = eventService.GetEventAudit(ctx, event.ID, 10, 0)
+		if err != nil {
+			t.Fatalf("get audit: %v", err)
+		}
+		if len(audit.Attempts) > 0 && audit.Attempts[0].Status == "success" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if len(audit.Attempts) == 0 {
+
+	if audit == nil || len(audit.Attempts) == 0 {
 		t.Fatal("expected audit attempts")
 	}
 	if audit.Attempts[0].Status != "success" {
