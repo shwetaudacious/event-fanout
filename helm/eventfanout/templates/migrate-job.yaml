@@ -1,0 +1,52 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "event-fanout.fullname" . }}-migrate
+  labels:
+    {{- include "event-fanout.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  001_init_schema.sql: |
+{{ .Files.Get "files/001_init_schema.sql" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "event-fanout.fullname" . }}-migrate
+  labels:
+    {{- include "event-fanout.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: postgres:15-alpine
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "event-fanout.fullname" . }}-db
+                  key: connection-url
+          command:
+            - sh
+            - -ec
+            - |
+              psql "$DATABASE_URL" -f /migrations/001_init_schema.sql
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "event-fanout.fullname" . }}-migrate
+{{- end }}

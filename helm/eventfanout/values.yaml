@@ -76,14 +76,19 @@ postgresql:
     persistence:
       size: 10Gi
 
-# Redis configuration
+# Redis configuration (in-cluster fallback when DO Managed Redis unavailable)
 redis:
   enabled: true
-  auth:
-    enabled: false
-  master:
-    persistence:
-      size: 2Gi
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
 
 # Event fanout service configuration
 config:
@@ -120,3 +125,6 @@ persistence:
   enabled: false
   storageClass: "do-block-storage"
   size: 10Gi
+
+migrations:
+  enabled: false

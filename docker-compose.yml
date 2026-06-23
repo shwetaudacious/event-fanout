@@ -48,6 +48,8 @@ services:
     environment:
       DATABASE_URL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
       REDIS_URL: "redis://redis:6379"
+      REDIS_STREAM_KEY: "events:stream"
+      REDIS_CONSUMER_GROUP: "fanout-workers"
       LOG_LEVEL: debug
       ENVIRONMENT: development
     depends_on:
@@ -67,6 +69,8 @@ services:
     environment:
       DATABASE_URL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
       REDIS_URL: "redis://redis:6379"
+      REDIS_STREAM_KEY: "events:stream"
+      REDIS_CONSUMER_GROUP: "fanout-workers"
       LOG_LEVEL: debug
       ENVIRONMENT: development
       MAX_DELIVERY_RETRIES: 5

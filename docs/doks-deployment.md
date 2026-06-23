@@ -37,13 +37,27 @@ The server persists events to Postgres, then enqueues to the Redis stream `event
 
 ## 1. Provision Infrastructure
 
+One-command setup (creates DOKS cluster, Managed PostgreSQL, Managed Redis, runs migrations, optionally syncs GitHub secrets):
+
+```bash
+export DIGITALOCEAN_ACCESS_TOKEN=dop_v1_...
+SYNC_GITHUB_SECRETS=1 make provision-doks
+```
+
+Or run the script directly:
+
+```bash
+./scripts/provision-digitalocean.sh
+```
+
+Manual steps below if you prefer the control panel.
+
 ### DOKS cluster
 
 ```bash
 doctl kubernetes cluster create event-fanout-cluster \
   --region nyc1 \
-  --version 1.31.2-do.0 \
-  --node-pool "name=workers;size=s-2vcpu-4gb;count=2"
+  --node-pool "name=workers;size=s-2vcpu-4gb;count=1"
 ```
 
 ### Managed PostgreSQL

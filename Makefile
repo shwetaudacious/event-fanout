@@ -1,4 +1,4 @@
-.PHONY: help build test lint fmt clean docker-build docker-push up down logs migrate
+.PHONY: help build test lint fmt clean docker-build docker-push up down logs migrate provision-doks deploy-doks
 
 # Variables
 BINARY_SERVER=server
@@ -23,6 +23,8 @@ help:
 	@echo "  down              - Stop services"
 	@echo "  logs              - View container logs"
 	@echo "  migrate           - Run database migrations"
+	@echo "  provision-doks    - Provision DOKS + Managed Postgres + Redis (requires DIGITALOCEAN_ACCESS_TOKEN)"
+	@echo "  deploy-doks       - Helm deploy to DOKS (requires DATABASE_URL, REDIS_URL)"
 
 build:
 	$(GO) build -o bin/$(BINARY_SERVER) ./cmd/server
@@ -101,3 +103,15 @@ test-create-sub:
 	curl -X POST http://localhost:8080/api/v1/subscriptions \
 		-H "Content-Type: application/json" \
 		-d '{"webhook_url":"http://webhook.example.com","rules":{"type":"test.event"}}'
+
+migrate:
+	psql "$${DATABASE_URL:-postgres://postgres:postgres123@localhost:5432/eventfanout?sslmode=disable}" -f migrations/001_init_schema.sql
+
+provision-doks:
+	@test -n "$$DIGITALOCEAN_ACCESS_TOKEN" || (echo "Set DIGITALOCEAN_ACCESS_TOKEN"; exit 1)
+	chmod +x scripts/provision-digitalocean.sh
+	./scripts/provision-digitalocean.sh
+
+deploy-doks:
+	chmod +x scripts/deploy-doks.sh
+	./scripts/deploy-doks.sh

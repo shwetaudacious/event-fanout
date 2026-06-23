@@ -6,7 +6,7 @@
 #     --set secrets.databaseURL="$DATABASE_URL" \
 #     --set secrets.redisURL="$REDIS_URL"
 
-replicaCount: 2
+replicaCount: 1
 
 image:
   repository: ghcr.io/shwetaudacious/event-fanout
@@ -18,25 +18,29 @@ service:
 config:
   environment: production
   logLevel: info
-  workerReplicas: 2
+  workerReplicas: 1
   fanoutWorkerPoolSize: 10
   redisStreamKey: events:stream
   redisConsumerGroup: fanout-workers
 
-# Disable in-cluster Postgres/Redis — use DO Managed Databases
+# Disable in-cluster Postgres — use DO Managed PostgreSQL
 postgresql:
   enabled: false
 
+# In-cluster Redis 7 (Streams). DO Managed Redis is unavailable on some accounts;
+# this still satisfies the Redis Streams fanout backbone requirement.
 redis:
-  enabled: false
+  enabled: true
 
 secrets:
   create: true
-  # Override at deploy time:
-  # databaseURL: postgres://user:pass@private-host:25060/eventfanout?sslmode=require
-  # redisURL: rediss://default:pass@private-redis-host:25061
+  # databaseURL set at deploy time from managed Postgres
+  redisURL: "redis://event-fanout-queue:6379"
 
 autoscaling:
   enabled: true
-  minReplicas: 2
-  maxReplicas: 8
+  minReplicas: 1
+  maxReplicas: 3
+
+migrations:
+  enabled: true

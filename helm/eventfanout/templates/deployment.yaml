@@ -65,10 +65,6 @@ spec:
               value: "{{ .Values.config.redisStreamKey }}"
             - name: REDIS_CONSUMER_GROUP
               value: "{{ .Values.config.redisConsumerGroup }}"
-            - name: REDIS_CONSUMER_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
           livenessProbe:
             httpGet:
               path: /health
