@@ -61,6 +61,9 @@ func setupEnv(t *testing.T) *testEnv {
 	if err := repository.RunMigrations(ctx, pool, string(migrationSQL)); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
+	if _, err := pool.Exec(ctx, "TRUNCATE events, subscriptions, delivery_attempts CASCADE"); err != nil {
+		t.Fatalf("truncate tables: %v", err)
+	}
 
 	redisClient, err := redisutil.NewClient(redisURL)
 	if err != nil {
@@ -102,7 +105,7 @@ func (e *testEnv) startWorker(t *testing.T, maxRetries, baseDelaySec int) {
 		e.eventRepo, e.subRepo, e.deliveryRepo,
 		webhookClient, maxRetries, baseDelaySec, e.logger,
 	)
-	processor := worker.NewProcessor(e.queue, fanout, 500*time.Millisecond, 500*time.Millisecond, 10, e.logger)
+	processor := worker.NewProcessor(e.queue, fanout, time.Second, time.Second, 10, e.logger)
 	go processor.Run(e.ctx)
 }
 

@@ -229,6 +229,14 @@ func TestSubscriptionCRUD(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
+	got, err := env.subService.GetSubscription(env.ctx, sub.ID)
+	if err != nil {
+		t.Fatalf("get after create: %v", err)
+	}
+	if got.ID != sub.ID {
+		t.Fatal("subscription not found after create")
+	}
+
 	subs, err := env.subService.ListSubscriptions(env.ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)

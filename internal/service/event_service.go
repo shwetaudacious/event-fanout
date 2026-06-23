@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -41,6 +42,10 @@ func NewEventService(
 
 // IngestEvent receives an event, stores it durably, and enqueues it for fanout.
 func (s *EventService) IngestEvent(ctx context.Context, req *models.CreateEventRequest) (*models.Event, error) {
+	if req.Payload == nil || len(req.Payload) == 0 {
+		req.Payload = json.RawMessage(`{}`)
+	}
+
 	event := &models.Event{
 		ID:        uuid.New(),
 		Type:      req.Type,
