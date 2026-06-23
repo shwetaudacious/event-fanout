@@ -1,0 +1,14 @@
+apiVersion: v2
+name: event-fanout
+description: A Helm chart for deploying the event fanout service on DOKS
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - event
+  - fanout
+  - webhook
+  - notification
+maintainers:
+  - name: Your Organization
+    email: devops@example.com

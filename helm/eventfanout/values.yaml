@@ -1,0 +1,112 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/your-username/event-fanout-service
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsUser: 1000
+  runAsNonRoot: true
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: event-fanout.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Database configuration
+postgresql:
+  enabled: true
+  auth:
+    username: postgres
+    password: postgres123
+    database: eventfanout
+  primary:
+    persistence:
+      size: 10Gi
+
+# Redis configuration
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      size: 2Gi
+
+# Event fanout service configuration
+config:
+  serverPort: 8080
+  serverHost: "0.0.0.0"
+  logLevel: info
+  environment: production
+  maxWorkers: 5
+  eventProcessorWorkers: 2
+  fanoutWorkerPoolSize: 10
+  maxDeliveryRetries: 5
+  baseRetryDelaySeconds: 5
+  webhookTimeoutSeconds: 30
+  webhookMaxBodyBytes: 1048576
+
+# Metrics and monitoring
+metrics:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+
+# Persistence for event audit logs (optional)
+persistence:
+  enabled: false
+  storageClass: "do-block-storage"
+  size: 10Gi

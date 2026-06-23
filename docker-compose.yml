@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: event_fanout_db
+    environment:
+      POSTGRES_DB: eventfanout
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_init_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - event-fanout
+
+  redis:
+    image: redis:7-alpine
+    container_name: event_fanout_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - event-fanout
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: event_fanout_server
+    command: /app/server
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: debug
+      ENVIRONMENT: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - event-fanout
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: event_fanout_worker
+    command: /app/worker
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: debug
+      ENVIRONMENT: development
+      MAX_DELIVERY_RETRIES: 5
+      BASE_RETRY_DELAY_SECONDS: 5
+      WEBHOOK_TIMEOUT_SECONDS: 30
+      FANOUT_WORKER_POOL: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - event-fanout
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  event-fanout:
+    driver: bridge
