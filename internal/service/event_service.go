@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,16 +13,16 @@ import (
 	"github.com/event-fanout-service/event-fanout/internal/repository"
 )
 
-// EventService handles event ingestion and processing
+// EventService handles event ingestion and audit queries.
 type EventService struct {
-	eventRepo   *repository.EventRepository
-	subRepo     *repository.SubscriptionRepository
+	eventRepo    *repository.EventRepository
+	subRepo      *repository.SubscriptionRepository
 	deliveryRepo *repository.DeliveryRepository
-	redisCli    queue.Queue
-	logger      *zap.Logger
+	redisCli     queue.Queue
+	logger       *zap.Logger
 }
 
-// NewEventService creates a new event service
+// NewEventService creates a new event service.
 func NewEventService(
 	eventRepo *repository.EventRepository,
 	subRepo *repository.SubscriptionRepository,
@@ -38,7 +39,7 @@ func NewEventService(
 	}
 }
 
-// IngestEvent receives an event and stores it durably
+// IngestEvent receives an event, stores it durably, and enqueues it for fanout.
 func (s *EventService) IngestEvent(ctx context.Context, req *models.CreateEventRequest) (*models.Event, error) {
 	event := &models.Event{
 		ID:        uuid.New(),
@@ -53,34 +54,82 @@ func (s *EventService) IngestEvent(ctx context.Context, req *models.CreateEventR
 		return nil, err
 	}
 
+	if s.redisCli != nil {
+		if err := s.redisCli.EnqueueEvent(ctx, event); err != nil {
+			s.logger.Error("failed to enqueue event", zap.Error(err))
+			return nil, fmt.Errorf("enqueue event: %w", err)
+		}
+	}
+
 	s.logger.Info("event ingested", zap.String("event_id", event.ID.String()))
 	return event, nil
 }
 
-// ProcessEvent evaluates all subscriptions and creates delivery attempts
-func (s *EventService) ProcessEvent(ctx context.Context, event *models.Event) error {
-	s.logger.Info("event processed", zap.String("event_id", event.ID.String()))
-	return nil
+// GetEvent retrieves an event by ID.
+func (s *EventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error) {
+	return s.eventRepo.GetByID(ctx, eventID)
 }
 
-// GetEventAudit returns delivery history for an event
+// GetEventAudit returns delivery history for an event.
 func (s *EventService) GetEventAudit(ctx context.Context, eventID uuid.UUID, limit, offset int) (*models.DeliveryAudit, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
 	event, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil {
 		return nil, err
 	}
 
-	audit := &models.DeliveryAudit{
-		EventID:       event.ID,
-		Event:         event,
-		Subscriptions: 0,
-		Attempts:      make([]models.DeliveryAttemptView, 0),
+	attempts, err := s.deliveryRepo.ListByEventID(ctx, eventID, limit, offset)
+	if err != nil {
+		return nil, err
 	}
 
-	return audit, nil
+	subs, err := s.loadSubscriptionsForAttempts(ctx, attempts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.DeliveryAudit{
+		EventID:       event.ID,
+		Event:         event,
+		Subscriptions: len(subs),
+		Attempts:      BuildAuditViews(attempts, subs),
+	}, nil
 }
 
-// GetSubscriptionAudit returns delivery history for a subscription
+// GetSubscriptionAudit returns delivery history for a subscription.
 func (s *EventService) GetSubscriptionAudit(ctx context.Context, subID uuid.UUID, limit, offset int) ([]models.DeliveryAttemptView, error) {
-	return make([]models.DeliveryAttemptView, 0), nil
+	if limit <= 0 {
+		limit = 50
+	}
+
+	sub, err := s.subRepo.GetByID(ctx, subID)
+	if err != nil {
+		return nil, err
+	}
+
+	attempts, err := s.deliveryRepo.ListBySubscriptionID(ctx, subID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	subs := map[uuid.UUID]models.Subscription{sub.ID: *sub}
+	return BuildAuditViews(attempts, subs), nil
+}
+
+func (s *EventService) loadSubscriptionsForAttempts(ctx context.Context, attempts []models.DeliveryAttempt) (map[uuid.UUID]models.Subscription, error) {
+	subs := make(map[uuid.UUID]models.Subscription)
+	for _, attempt := range attempts {
+		if _, ok := subs[attempt.SubscriptionID]; ok {
+			continue
+		}
+		sub, err := s.subRepo.GetByID(ctx, attempt.SubscriptionID)
+		if err != nil {
+			continue
+		}
+		subs[attempt.SubscriptionID] = *sub
+	}
+	return subs, nil
 }

@@ -96,7 +96,7 @@ metadata:
     {{- include "event-fanout.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
-  replicas: {{ .Values.config.fanoutWorkerPoolSize  }}
+  replicas: {{ .Values.config.workerReplicas | default 2 }}
   selector:
     matchLabels:
       {{- include "event-fanout.selectorLabels" . | nindent 6 }}
@@ -137,6 +137,8 @@ spec:
               value: "{{ .Values.config.baseRetryDelaySeconds }}"
             - name: WEBHOOK_TIMEOUT_SECONDS
               value: "{{ .Values.config.webhookTimeoutSeconds }}"
+            - name: FANOUT_WORKER_POOL
+              value: "{{ .Values.config.fanoutWorkerPoolSize }}"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

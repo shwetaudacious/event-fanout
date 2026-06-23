@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: ghcr.io/your-username/event-fanout-service
+  repository: ghcr.io/shwetaudacious/event-fanout
   pullPolicy: IfNotPresent
   tag: "latest"
 
@@ -94,10 +94,17 @@ config:
   maxWorkers: 5
   eventProcessorWorkers: 2
   fanoutWorkerPoolSize: 10
+  workerReplicas: 2
   maxDeliveryRetries: 5
   baseRetryDelaySeconds: 5
   webhookTimeoutSeconds: 30
   webhookMaxBodyBytes: 1048576
+
+# Connection secrets (override for DOKS with managed DB/Redis URLs)
+secrets:
+  create: true
+  databaseURL: "postgres://postgres:postgres123@postgres:5432/eventfanout?sslmode=disable"
+  redisURL: "redis://redis:6379"
 
 # Metrics and monitoring
 metrics:

@@ -7,16 +7,41 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test:
+  unit-test:
     runs-on: ubuntu-latest
-    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          flags: unittests
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  integration-test:
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:15-alpine
         env:
-          POSTGRES_DB: testdb
+          POSTGRES_DB: eventfanout
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: postgres123
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -24,7 +49,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       redis:
         image: redis:7-alpine
         options: >-
@@ -37,26 +62,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
-          cache: 'go'
-      
-      - name: Run unit tests
-        run: |
-          go test -v -race -coverprofile=coverage.out ./...
-      
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./coverage.out
-          flags: unittests
-          name: codecov-umbrella
-      
-      - name: Run linter
-        uses: golangci/golangci-lint-action@v3
-        with:
-          version: latest
-          args: --timeout=5m
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres123@localhost:5432/eventfanout?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+        run: go test -v -tags=integration ./tests/integration/...

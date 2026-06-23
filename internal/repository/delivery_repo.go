@@ -26,15 +26,15 @@ func NewDeliveryRepository(db *pgxpool.Pool) *DeliveryRepository {
 func (r *DeliveryRepository) Create(ctx context.Context, attempt *models.DeliveryAttempt) error {
 	query := `
 		INSERT INTO delivery_attempts 
-		(id, event_id, subscription_id, attempt_number, status, http_code, error_message, next_retry_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		(id, event_id, subscription_id, attempt_number, status, http_code, error_message, next_retry_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		ON CONFLICT (event_id, subscription_id) DO UPDATE
 		SET attempt_number = delivery_attempts.attempt_number + 1,
-		    status = $5,
-		    http_code = $6,
-		    error_message = $7,
-		    next_retry_at = $8,
-		    created_at = NOW()
+		    status = EXCLUDED.status,
+		    http_code = EXCLUDED.http_code,
+		    error_message = EXCLUDED.error_message,
+		    next_retry_at = EXCLUDED.next_retry_at,
+		    updated_at = NOW()
 	`
 	_, err := r.db.Exec(ctx, query,
 		attempt.ID, attempt.EventID, attempt.SubscriptionID,
@@ -160,10 +160,22 @@ func (r *DeliveryRepository) ListPendingRetries(ctx context.Context, limit int) 
 func (r *DeliveryRepository) UpdateStatus(ctx context.Context, attemptID uuid.UUID, status string, httpCode *int, errMsg *string, nextRetry *time.Time) error {
 	query := `
 		UPDATE delivery_attempts
-		SET status = $1, http_code = $2, error_message = $3, next_retry_at = $4
+		SET status = $1, http_code = $2, error_message = $3, next_retry_at = $4, updated_at = NOW()
 		WHERE id = $5
 	`
 	_, err := r.db.Exec(ctx, query, status, httpCode, errMsg, nextRetry, attemptID)
+	return err
+}
+
+// IncrementAttempt updates attempt metadata after a failed delivery.
+func (r *DeliveryRepository) IncrementAttempt(ctx context.Context, attemptID uuid.UUID, status string, httpCode *int, errMsg *string, nextRetry *time.Time, attemptNumber int) error {
+	query := `
+		UPDATE delivery_attempts
+		SET status = $1, http_code = $2, error_message = $3, next_retry_at = $4,
+		    attempt_number = $5, updated_at = NOW()
+		WHERE id = $6
+	`
+	_, err := r.db.Exec(ctx, query, status, httpCode, errMsg, nextRetry, attemptNumber, attemptID)
 	return err
 }
 

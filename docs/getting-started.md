@@ -1,14 +1,14 @@
 # Getting Started
 
-This guide covers three ways to run the Event Fanout Service locally and walks through an end-to-end API tutorial.
+This guide covers three ways to run the Event Fanout Service and walks through a full ingest → fanout → audit flow.
 
 ## Prerequisites
 
 | Path | Requirements |
 |------|-------------|
-| Docker Compose (recommended) | Docker, Docker Compose, curl |
-| Native Go | Go 1.26.4+, PostgreSQL 15, Redis 7, curl |
-| Kubernetes | kubectl, Helm 3, a running cluster |
+| Docker Compose (recommended) | Docker, Docker Compose, curl, jq (optional) |
+| Native Go | Go 1.22+, PostgreSQL 15, Redis 7, curl |
+| DOKS / Kubernetes | kubectl, Helm 3, DOKS cluster — see [DOKS Deployment](doks-deployment.md) |
 
 ---
 
@@ -17,7 +17,7 @@ This guide covers three ways to run the Event Fanout Service locally and walks t
 ### 1. Clone and start
 
 ```bash
-git clone https://github.com/event-fanout-service/event-fanout.git
+git clone https://github.com/shwetaudacious/event-fanout.git
 cd event-fanout
 make up
 ```
@@ -27,11 +27,11 @@ This starts four containers:
 | Container | Role | Host port |
 |-----------|------|-----------|
 | `event_fanout_server` | HTTP API | `8080` |
-| `event_fanout_worker` | Background processor (stub) | — |
+| `event_fanout_worker` | Fanout + webhook delivery + retries | — |
 | `event_fanout_db` | PostgreSQL 15 | `5432` |
 | `event_fanout_redis` | Redis 7 | `6379` |
 
-The database schema is applied automatically from `migrations/001_init_schema.sql` on first boot.
+Schema is applied automatically from `migrations/001_init_schema.sql` on first boot.
 
 ### 2. Verify health
 
@@ -61,7 +61,7 @@ make down
 ```bash
 make logs          # All container logs
 make logs-server   # Server only
-make logs-worker   # Worker only
+make logs-worker   # Worker only (webhook delivery logs)
 make ps            # Container status
 ```
 
@@ -71,12 +71,12 @@ make ps            # Container status
 
 ### 1. Install dependencies
 
-Ensure PostgreSQL and Redis are running locally, then create the database:
-
 ```bash
 createdb eventfanout
 psql eventfanout < migrations/001_init_schema.sql
 ```
+
+Ensure Redis is running on `localhost:6379`.
 
 ### 2. Set environment variables
 
@@ -86,99 +86,71 @@ export REDIS_URL="redis://localhost:6379"
 export LOG_LEVEL="debug"
 export ENVIRONMENT="development"
 export SERVER_PORT="8080"
+export MAX_DELIVERY_RETRIES="5"
+export BASE_RETRY_DELAY_SECONDS="5"
+export WEBHOOK_TIMEOUT_SECONDS="30"
 ```
 
-Adjust `DATABASE_URL` credentials to match your local Postgres setup.
-
 ### 3. Build and run
+
+Both processes are required for end-to-end fanout:
 
 ```bash
 make build
 ./bin/server    # Terminal 1 — HTTP API on :8080
-./bin/worker    # Terminal 2 — background processor (stub)
+./bin/worker    # Terminal 2 — consumes queue, delivers webhooks
 ```
-
-> **Note:** The worker currently connects to PostgreSQL and Redis, logs readiness, and waits for a shutdown signal. Event processing and webhook delivery are not yet implemented.
 
 ### 4. Run tests
 
 ```bash
-make test
-make test-coverage   # Generates coverage.html
+make test                                              # Unit tests
+go test -tags=integration ./tests/integration/...      # Integration (needs Postgres + Redis)
+make test-coverage                                     # Coverage report
 ```
 
 ---
 
-## Path C — Kubernetes / Helm
+## Path C — DOKS / Kubernetes
 
-### Prerequisites
+For production deployment to DigitalOcean Kubernetes, see **[DOKS Deployment](doks-deployment.md)**.
 
-- A Kubernetes cluster (e.g. DigitalOcean DOKS)
-- `kubectl` configured for the cluster
-- Helm 3 installed
-
-### Deploy
+Quick manual deploy:
 
 ```bash
-# Create namespace
-kubectl create namespace event-fanout
-
-# Install chart
-helm install event-fanout ./helm/eventfanout \
-  -n event-fanout \
-  -f ./helm/eventfanout/values.yaml
-
-# Verify pods
-kubectl get pods -n event-fanout
-kubectl logs -n event-fanout -f deployment/event-fanout-server
+helm upgrade --install event-fanout ./helm/eventfanout \
+  -n event-fanout --create-namespace \
+  --set image.repository=ghcr.io/shwetaudacious/event-fanout \
+  --set secrets.databaseURL="$DATABASE_URL" \
+  --set secrets.redisURL="$REDIS_URL"
 ```
-
-### Upgrade
-
-```bash
-helm upgrade event-fanout ./helm/eventfanout \
-  -n event-fanout \
-  -f ./helm/eventfanout/values.yaml
-```
-
-### Access locally
-
-```bash
-# Port-forward
-kubectl port-forward -n event-fanout svc/event-fanout 8080:80
-
-# Or use LoadBalancer external IP
-kubectl get svc -n event-fanout
-```
-
-Update `helm/eventfanout/values.yaml` to point `image.repository` at your container registry before deploying to production.
 
 ---
 
 ## End-to-End Walkthrough
 
-This tutorial exercises the implemented API: create a subscription, ingest an event, and inspect the result.
+Full flow: subscription → ingest → worker fanout → webhook delivery → audit query.
 
 ```mermaid
 sequenceDiagram
     participant Dev as Developer
     participant API as Server
     participant DB as PostgreSQL
+    participant Redis as RedisQueue
+    participant Worker
+    participant Webhook
 
     Dev->>API: POST /api/v1/subscriptions
     API->>DB: Insert subscription
-    API-->>Dev: 201 Created
     Dev->>API: POST /api/v1/events
     API->>DB: Persist event
-    API-->>Dev: 201 Created
-    Dev->>API: GET /api/v1/subscriptions
-    API->>DB: Query subscriptions
-    API-->>Dev: 200 OK
-    Dev->>API: GET /health
-    API-->>Dev: 200 OK
+    API->>Redis: Enqueue event
+    Worker->>Redis: Dequeue event
+    Worker->>Webhook: POST payload
+    Dev->>API: GET /api/v1/events/{id}/audit
+    API->>DB: Query delivery_attempts
+    API-->>Dev: Audit with status + HTTP code
 ```
-
-> Redis enqueue and webhook delivery are planned but not yet active in the ingestion path. See [Implementation Status](project-details.md#implementation-status).
 
 ### Step 1 — Start the stack
 
@@ -188,6 +160,8 @@ curl http://localhost:8080/health
 ```
 
 ### Step 2 — Create a subscription
+
+Use [webhook.site](https://webhook.site) to get a test URL, then:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/subscriptions \
@@ -201,13 +175,7 @@ curl -s -X POST http://localhost:8080/api/v1/subscriptions \
   }' | jq .
 ```
 
-Save the returned `id` — you will use it in later steps.
-
-Or use the Makefile shortcut:
-
-```bash
-make test-create-sub
-```
+Save the returned `id` as `SUB_ID`.
 
 ### Step 3 — Ingest a matching event
 
@@ -217,67 +185,67 @@ curl -s -X POST http://localhost:8080/api/v1/events \
   -d '{
     "type": "user.created",
     "source": "auth-service",
-    "payload": {
-      "user_id": "123",
-      "email": "user@example.com"
-    }
+    "payload": {"user_id": "123", "email": "user@example.com"}
   }' | jq .
 ```
 
-Or:
+Save the returned `id` as `EVENT_ID`. Within a few seconds the worker delivers to your webhook URL.
+
+### Step 4 — Verify webhook delivery
+
+Check webhook.site for the POST payload, or inspect worker logs:
 
 ```bash
-make test-ingest
+make logs-worker
 ```
 
-The response includes the event `id` and `created_at` timestamp confirming durable storage.
-
-### Step 4 — List subscriptions
+### Step 5 — Query delivery audit
 
 ```bash
-curl -s http://localhost:8080/api/v1/subscriptions | jq .
-# or
-make test-list-subs
+curl -s http://localhost:8080/api/v1/events/$EVENT_ID/audit | jq .
 ```
 
-### Step 5 — Retrieve a single subscription
+Expected: `attempts[0].status` is `"success"` with `http_code: 200`.
 
-Replace `{subId}` with the ID from Step 2:
+Subscription-level audit:
 
 ```bash
-curl -s http://localhost:8080/api/v1/subscriptions/{subId} | jq .
+curl -s http://localhost:8080/api/v1/subscriptions/$SUB_ID/audit | jq .
 ```
 
-### Step 6 — Update a subscription
-
-```bash
-curl -s -X PUT http://localhost:8080/api/v1/subscriptions/{subId} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhook_url": "https://webhook.site/new-endpoint",
-    "rules": {"type": "user.created"}
-  }' | jq .
-```
-
-### Step 7 — View server logs
-
-```bash
-make logs-server
-```
-
-Look for structured JSON log lines such as `"msg":"event ingested"` with the event ID.
-
-### Step 8 — Run the test suite
+### Step 6 — Run tests
 
 ```bash
 make test
 ```
 
-### Step 9 — Clean up
+### Step 7 — Clean up
 
 ```bash
 make down
 ```
+
+---
+
+## Filter Rules Example
+
+Match premium users with a payload rule:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "https://webhook.site/your-id",
+    "rules": {
+      "type": "user.created",
+      "payload_rules": [
+        {"path": "$.tier", "op": "==", "value": "premium"}
+      ]
+    }
+  }'
+```
+
+Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `regex`. Type and source support `*` wildcards.
 
 ---
 
@@ -285,33 +253,31 @@ make down
 
 ### Port already in use
 
-If `5432`, `6379`, or `8080` is occupied:
-
 ```bash
-# Find what's using the port
-ss -tlnp | grep 8080
-
-# Stop conflicting services or change docker-compose port mappings
+ss -tlnp | grep -E '8080|5432|6379'
 ```
+
+Stop conflicting services or adjust ports in `docker-compose.yml`.
 
 ### Database connection refused
 
-Docker Compose waits for Postgres healthchecks before starting the server. If the server fails immediately:
-
 ```bash
-docker-compose ps          # Check postgres is healthy
-docker-compose logs postgres
+docker compose ps
+docker compose logs postgres
 ```
 
-For native Go development, confirm Postgres is running and `DATABASE_URL` is correct.
+Wait for the Postgres healthcheck before the server starts.
 
-### Redis connection errors
+### Events ingested but not delivered
 
-The server and worker currently connect to Redis at hardcoded `localhost:6379` in [`cmd/server/main.go`](../cmd/server/main.go) and [`cmd/worker/main.go`](../cmd/worker/main.go), regardless of `REDIS_URL`. This works for native development and Docker Compose (each container has its own network namespace with Redis reachable at the service hostname in compose — note this as a known limitation when running outside compose).
+1. Confirm the worker container is running: `make ps`
+2. Check worker logs: `make logs-worker`
+3. Verify subscription rules match the event type/source
+4. Confirm the webhook URL is reachable from the worker container
 
 ### Schema errors on startup
 
-Re-create the database volume:
+Reset the database volume:
 
 ```bash
 make down
@@ -319,13 +285,10 @@ docker volume rm event-fanout_postgres_data 2>/dev/null || true
 make up
 ```
 
-### Worker exits immediately
-
-Expected behavior today — the worker is a stub that waits for SIGTERM/SIGINT. Webhook processing will be added in a future release.
-
 ---
 
 ## Next Steps
 
-- [Project Details](project-details.md) — configuration reference, data model, filter rules
-- [Architecture](architecture.md) — system diagrams and planned delivery pipeline
+- [Architecture](architecture.md) — ingest → fanout → retry → audit diagrams
+- [Project Details](project-details.md) — config, API reference, data model
+- [DOKS Deployment](doks-deployment.md) — production deploy to DigitalOcean Kubernetes

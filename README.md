@@ -1,139 +1,169 @@
 # Event Fanout Service
 
-A production-oriented event ingestion and webhook fanout service. Clients POST structured events; the service persists them, matches subscriptions by filter rules, and delivers notifications to registered webhook endpoints with retry and audit capabilities.
+A production-ready event ingestion and webhook fanout service. Clients POST structured events; the service persists them durably, matches subscriptions by filter rules, and delivers notifications to registered webhook endpoints with retry, audit, and observability.
 
-**Stack:** Go · PostgreSQL 15 · Redis 7 · Docker · Helm · GitHub Actions
+**Stack:** Go · PostgreSQL 15 · Redis 7 · Docker · Helm · DOKS · GitHub Actions
 
 ## Overview
 
-The Event Fanout Service routes events to interested subscribers based on filter rules. It is designed for durable ingestion, asynchronous fanout, exponential-backoff retries, and a full delivery audit trail.
-
 | Capability | Status |
 |------------|--------|
-| Event ingestion API | Implemented |
-| Subscription CRUD | Implemented |
-| Rules matcher (type/source) | Implemented |
-| Background worker + webhook delivery | Planned |
-| Delivery audit HTTP endpoints | Planned |
-| Redis Streams queue | Planned (currently Redis list) |
-
-See [Implementation Status](docs/project-details.md#implementation-status) for details.
+| Durable event ingestion (`POST /api/v1/events`) | Implemented |
+| Subscription CRUD with filter rules | Implemented |
+| Async fanout + webhook delivery | Implemented |
+| Retry with exponential backoff | Implemented |
+| Delivery audit endpoints | Implemented |
+| DOKS deployment (Helm + GitHub Actions) | Implemented |
 
 ## Quick Start
 
-**Prerequisites:** Docker, Docker Compose, curl
-
 ```bash
-git clone https://github.com/event-fanout-service/event-fanout.git
+git clone https://github.com/shwetaudacious/event-fanout.git
 cd event-fanout
 make up
-```
-
-Verify the service is running:
-
-```bash
 curl http://localhost:8080/health
 ```
 
-Create a subscription:
+Create a subscription and ingest an event:
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/subscriptions \
   -H "Content-Type: application/json" \
-  -d '{
-    "webhook_url": "http://webhook.example.com/events",
-    "rules": {"type": "user.created", "source": "auth-service"}
-  }'
-```
+  -d '{"webhook_url":"https://webhook.site/your-id","rules":{"type":"user.created"}}'
 
-Ingest an event:
-
-```bash
 curl -X POST http://localhost:8080/api/v1/events \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "user.created",
-    "source": "auth-service",
-    "payload": {"user_id": "123", "email": "user@example.com"}
-  }'
+  -d '{"type":"user.created","source":"auth-service","payload":{"user_id":"123"}}'
 ```
 
-For native Go setup, Helm deployment, troubleshooting, and a full walkthrough, see [Getting Started](docs/getting-started.md).
+See [Getting Started](docs/getting-started.md) for native Go setup, testing, and troubleshooting.
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Getting Started](docs/getting-started.md) | Docker Compose, native Go, Helm, end-to-end tutorial |
-| [Project Details](docs/project-details.md) | Repo layout, config, data model, Makefile, API surface |
-| [Architecture](docs/architecture.md) | System diagrams, data flows, deployment topology |
-
-## Features
-
-- **Event Ingestion** — REST endpoint accepts structured JSON events, persisted to PostgreSQL
-- **Subscription Management** — CRUD for webhooks with JSON filter rules
-- **Rules Engine** — Match events by type and source (payload rules planned)
-- **Async Fanout** — Worker-based delivery to matching subscribers *(planned)*
-- **Retry with Backoff** — Exponential backoff for failed deliveries *(planned)*
-- **Delivery Audit** — Query delivery history per event or subscription *(planned)*
-- **Docker & Kubernetes** — Multi-stage Docker build, Helm chart, GitHub Actions CI
-
-## API Summary
-
-| Method | Endpoint | Status | Description |
-|--------|----------|--------|-------------|
-| `GET` | `/health` | Implemented | Health check |
-| `POST` | `/api/v1/events` | Implemented | Ingest an event |
-| `POST` | `/api/v1/subscriptions` | Implemented | Create subscription |
-| `GET` | `/api/v1/subscriptions` | Implemented | List subscriptions |
-| `GET` | `/api/v1/subscriptions/{subId}` | Implemented | Get subscription |
-| `PUT` | `/api/v1/subscriptions/{subId}` | Implemented | Update subscription |
-| `DELETE` | `/api/v1/subscriptions/{subId}` | Implemented | Delete subscription (soft) |
-| `GET` | `/api/v1/events/{eventId}` | Planned | Retrieve event |
-| `GET` | `/api/v1/events/{eventId}/audit` | Planned | Delivery audit for event |
-| `GET` | `/api/v1/subscriptions/{subId}/audit` | Planned | Delivery audit for subscription |
-
-Request/response examples and filter rule syntax are in [Project Details](docs/project-details.md#api-surface).
+| [Getting Started](docs/getting-started.md) | Local setup and end-to-end walkthrough |
+| [Architecture](docs/architecture.md) | Flow diagrams from ingest → fanout → audit |
+| [Project Details](docs/project-details.md) | Config, data model, API reference |
+| [DOKS Deployment](docs/doks-deployment.md) | Deploy to DigitalOcean Kubernetes |
 
 ## Architecture
-
-High-level system design:
 
 ```mermaid
 flowchart TB
     Client[ClientApps] --> API[HTTPServer]
     API --> PG[(PostgreSQL)]
-    API --> Redis[(Redis)]
-    Worker[FanoutWorker] --> PG
-    Worker --> Redis
+    API --> Redis[(RedisQueue)]
+    Worker[FanoutWorker] --> Redis
+    Worker --> PG
     Worker --> Webhooks[SubscriberWebhooks]
+    API --> Audit[AuditAPI]
+    Audit --> PG
 ```
 
-The worker and webhook delivery path are planned. See [Architecture](docs/architecture.md) for component diagrams, sequence flows, and deployment topology.
+Full sequence diagrams: [docs/architecture.md](docs/architecture.md)
+
+## API Summary
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Health check (DB + Redis) |
+| `POST` | `/api/v1/events` | Ingest event |
+| `GET` | `/api/v1/events/{eventId}` | Get event |
+| `GET` | `/api/v1/events/{eventId}/audit` | Delivery audit for event |
+| `POST` | `/api/v1/subscriptions` | Create subscription |
+| `GET` | `/api/v1/subscriptions` | List subscriptions |
+| `GET/PUT/DELETE` | `/api/v1/subscriptions/{subId}` | Manage subscription |
+| `GET` | `/api/v1/subscriptions/{subId}/audit` | Delivery audit for subscription |
+
+## Filter Rule Syntax
+
+```json
+{
+  "type": "user.*",
+  "source": "auth-service",
+  "payload_rules": [
+    {"path": "$.role", "op": "==", "value": "admin"},
+    {"path": "$.amount", "op": ">", "value": 1000}
+  ]
+}
+```
+
+Operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `regex`. See [Project Details](docs/project-details.md#filter-rule-syntax).
+
+## Delivery Guarantees
+
+**Semantics: at-least-once per subscriber.**
+
+- Events are written to PostgreSQL before enqueueing to Redis.
+- Each matching subscription gets a `delivery_attempts` row; failed deliveries are retried with exponential backoff until `MAX_DELIVERY_RETRIES`.
+- HTTP 4xx responses are marked failed without retry (client error).
+- HTTP 5xx, timeouts, and network errors are retried.
+
+**Subscriber responsibility:** implement idempotency using the event `id` in the webhook payload.
+
+**Failure conditions:**
+
+| Scenario | Behavior |
+|----------|----------|
+| DB unavailable during ingest | Request fails with 500; event not accepted |
+| Redis unavailable during ingest | Request fails with 500 after DB write (requires ops reconciliation) |
+| Webhook timeout / 5xx | Retried with backoff |
+| Webhook 4xx | Marked failed, no retry |
+| Max retries exceeded | Marked failed permanently |
+
+## Testing
+
+```bash
+make test                                    # Unit tests
+go test -tags=integration ./tests/integration/...  # Integration tests (requires Postgres + Redis)
+```
+
+CI runs both unit and integration test jobs on every push.
+
+## DOKS Deployment
+
+Deploy to DigitalOcean Kubernetes using Helm:
+
+```bash
+helm upgrade --install event-fanout ./helm/eventfanout \
+  -n event-fanout --create-namespace \
+  --set secrets.databaseURL="$DATABASE_URL" \
+  --set secrets.redisURL="$REDIS_URL"
+```
+
+GitHub Actions deploys automatically after a successful image build. See [DOKS Deployment](docs/doks-deployment.md).
+
+Required secrets: `DIGITALOCEAN_ACCESS_TOKEN`, `DATABASE_URL`, `REDIS_URL`.
+
+## What We Sacrifice for Simplicity vs. What We'd Harden Next
+
+| Simplified now | Would harden next |
+|----------------|-------------------|
+| Redis list queue (not Streams) | Redis Streams with consumer groups for horizontal worker scaling |
+| No transactional outbox | Outbox pattern for exactly-once enqueue after DB commit |
+| At-least-once delivery | Idempotency keys + dedup store for effectively-once |
+| No webhook HMAC signing | HMAC-SHA256 signature headers for authenticity |
+| Basic health checks | Deep readiness probes + circuit breakers per webhook |
+| No metrics/tracing | OpenTelemetry metrics, dashboards, distributed tracing |
+| Single-region | Multi-region active-active with CRDT/event replay |
+| No DLQ | Dead-letter queue with manual replay tooling |
 
 ## Development
 
 ```bash
-make build          # Build server and worker binaries
-make test           # Run unit tests
-make test-coverage  # Tests with coverage report
-make lint           # Run golangci-lint
-make fmt            # Format code and tidy modules
-make logs           # Tail docker-compose logs
+make build          # Build server + worker binaries
+make up             # Start full stack (server, worker, postgres, redis)
+make test           # Unit tests
+go test -tags=integration ./tests/integration/...  # Integration tests
+make lint           # golangci-lint
+make logs-worker    # Watch webhook delivery logs
 ```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Commit changes: `git commit -am 'Add feature'`
-4. Push branch: `git push origin feature/my-feature`
-5. Open a Pull Request
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
 
 ## Support
 
-- GitHub Issues: [event-fanout/issues](https://github.com/event-fanout-service/event-fanout/issues)
+[GitHub Issues](https://github.com/shwetaudacious/event-fanout/issues)

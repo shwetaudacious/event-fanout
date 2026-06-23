@@ -5,76 +5,90 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
 	"github.com/event-fanout-service/event-fanout/internal/config"
+	"github.com/event-fanout-service/event-fanout/internal/delivery"
+	"github.com/event-fanout-service/event-fanout/internal/queue"
+	"github.com/event-fanout-service/event-fanout/internal/redisutil"
 	"github.com/event-fanout-service/event-fanout/internal/repository"
+	"github.com/event-fanout-service/event-fanout/internal/service"
+	"github.com/event-fanout-service/event-fanout/internal/worker"
 )
 
 func main() {
-	// Load configuration
 	cfg := config.NewConfig()
 
-	// Initialize logger
 	logger := initLogger(cfg.LogLevel)
 	defer logger.Sync()
 
 	logger.Info("Starting event fanout worker", zap.String("version", "0.1.0"), zap.String("env", cfg.Env))
 
-	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize database connection pool
-	logger.Info("Connecting to PostgreSQL", zap.String("database_url", cfg.DatabaseURL))
 	db, err := repository.NewDBPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Fatal("failed to connect to PostgreSQL", zap.Error(err))
 	}
 	defer db.Close()
-	logger.Info("Successfully connected to PostgreSQL")
 
-	// Initialize Redis connection
-	logger.Info("Connecting to Redis")
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
+	redisClient, err := redisutil.NewClient(cfg.RedisURL)
+	if err != nil {
+		logger.Fatal("failed to parse Redis URL", zap.Error(err))
+	}
 	defer redisClient.Close()
 
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		logger.Fatal("failed to connect to Redis", zap.Error(err))
 	}
-	logger.Info("Successfully connected to Redis")
 
-	// TODO: Implement worker to process events from queue
-	// This will involve:
-	// 1. Creating repositories (event, subscription, delivery)
-	// 2. Consuming events from Redis queue
-	// 3. Matching events against subscriptions
-	// 4. Creating delivery attempts for matched subscriptions
-	// 5. Sending webhooks with retry logic
-	logger.Info("Worker initialized and ready")
-	logger.Info("Event processing not yet implemented - worker will exit shortly for now")
+	eventRepo := repository.NewEventRepository(db)
+	subRepo := repository.NewSubscriptionRepository(db)
+	deliveryRepo := repository.NewDeliveryRepository(db)
 
-	// Wait for interrupt signal
+	redisQueue, err := queue.NewRedisQueue(redisClient, logger)
+	if err != nil {
+		logger.Fatal("failed to create Redis queue", zap.Error(err))
+	}
+
+	webhookClient := delivery.NewClient(cfg.WebhookTimeoutSeconds, cfg.WebhookMaxBodyBytes)
+	fanoutService := service.NewFanoutService(
+		eventRepo,
+		subRepo,
+		deliveryRepo,
+		webhookClient,
+		cfg.MaxDeliveryRetries,
+		cfg.BaseRetryDelaySeconds,
+		logger,
+	)
+
+	processor := worker.NewProcessor(
+		redisQueue,
+		fanoutService,
+		5*time.Second,
+		2*time.Second,
+		cfg.FanoutWorkerPoolSize,
+		logger,
+	)
+
+	go processor.Run(ctx)
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 	<-sigChan
 
-	logger.Info("Received shutdown signal, shutting down...")
+	cancel()
 	logger.Info("Worker stopped")
 }
 
-// initLogger initializes the zap logger
 func initLogger(level string) *zap.Logger {
 	var cfg zap.Config
 	switch level {
 	case "debug":
 		cfg = zap.NewDevelopmentConfig()
-	case "info", "warn", "error":
-		cfg = zap.NewProductionConfig()
 	default:
 		cfg = zap.NewProductionConfig()
 	}

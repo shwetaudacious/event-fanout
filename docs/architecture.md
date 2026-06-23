@@ -1,326 +1,145 @@
 # Architecture
 
-System design documentation for the Event Fanout Service. Diagrams marked **current** reflect implemented behavior; diagrams marked **planned** describe the target design.
-
----
+System design for the Event Fanout Service — from event ingest through subscriber matching, fanout, retry loop, and delivery audit.
 
 ## System Context
-
-**Status: mixed (server current, worker planned)**
-
-Shows the major components and external dependencies at the highest level.
 
 ```mermaid
 flowchart TB
     Client[ClientApps] --> API[HTTPServer]
     API --> PG[(PostgreSQL)]
-    API --> Redis[(Redis)]
-    Worker[FanoutWorker] --> PG
-    Worker --> Redis
+    API --> Redis[(RedisQueue)]
+    Worker[FanoutWorker] --> Redis
+    Worker --> PG
     Worker --> Webhooks[SubscriberWebhooks]
+    Client --> Audit[AuditAPI]
+    Audit --> PG
 ```
 
 | Component | Role |
 |-----------|------|
-| **Client Apps** | Produce events and manage subscriptions via REST |
-| **HTTP Server** | Validates requests, persists events, manages subscriptions |
-| **PostgreSQL** | Durable store for events, subscriptions, delivery attempts |
-| **Redis** | Async event queue between ingestion and processing |
-| **Fanout Worker** | Consumes queue, matches rules, delivers webhooks |
-| **Subscriber Webhooks** | Downstream HTTP endpoints receiving event notifications |
+| **HTTP Server** | Ingest events, manage subscriptions, serve audit queries |
+| **PostgreSQL** | Durable store: events, subscriptions, delivery_attempts |
+| **Redis** | Async queue decoupling ingestion from fanout |
+| **Fanout Worker** | Consumes queue, matches rules, delivers webhooks, retries |
+| **Audit API** | Query delivery history per event or subscription |
 
-The HTTP server and PostgreSQL path is live today. The worker → webhook path is planned.
+---
+
+## End-to-End Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as HTTPServer
+    participant DB as PostgreSQL
+    participant Redis as RedisQueue
+    participant Worker
+    participant Webhook
+
+    Client->>API: POST /api/v1/events
+    API->>DB: INSERT event
+    API->>Redis: LPUSH events:queue
+    API-->>Client: 201 Created
+
+    Worker->>Redis: BRPOP event
+    Worker->>DB: SELECT active subscriptions
+    Worker->>Worker: Evaluate filter rules
+    Worker->>DB: INSERT delivery_attempt (pending)
+    Worker->>Webhook: POST payload
+    alt 2xx success
+        Worker->>DB: UPDATE status=success
+    else 5xx / timeout
+        Worker->>DB: UPDATE status=failed, schedule next_retry_at
+        Worker->>Webhook: Retry with exponential backoff
+    else 4xx client error
+        Worker->>DB: UPDATE status=failed (no retry)
+    end
+
+    Client->>API: GET /api/v1/events/{id}/audit
+    API->>DB: SELECT delivery_attempts
+    API-->>Client: Audit response
+```
 
 ---
 
 ## Component Diagram
 
-**Status: current structure, partial implementation**
-
-Internal package layout and dependencies.
-
 ```mermaid
 flowchart TB
     subgraph cmd [cmd]
-        ServerMain[server/main.go]
-        WorkerMain[worker/main.go]
+        ServerMain[server]
+        WorkerMain[worker]
     end
 
     subgraph internal [internal]
-        HTTP[http/handler.go]
-        EventSvc[service/event_service.go]
-        SubSvc[service/subscription_service.go]
-        Matcher[service/matcher.go]
-        Queue[queue/redis.go]
-        EventRepo[repository/event_repo.go]
-        SubRepo[repository/subscription_repo.go]
-        DeliveryRepo[repository/delivery_repo.go]
-        Config[config/config.go]
-        Models[models/models.go]
+        HTTP[http/handler]
+        EventSvc[service/event_service]
+        FanoutSvc[service/fanout_service]
+        Matcher[service/matcher]
+        Queue[queue/redis]
+        Delivery[delivery/client]
+        Repos[repository/*]
     end
 
-    ServerMain --> Config
     ServerMain --> HTTP
     ServerMain --> EventSvc
-    ServerMain --> SubSvc
     ServerMain --> Queue
-    ServerMain --> EventRepo
-    ServerMain --> SubRepo
-    ServerMain --> DeliveryRepo
-
-    WorkerMain --> Config
-    WorkerMain -.-> EventSvc
-    WorkerMain -.-> Queue
-
+    WorkerMain --> FanoutSvc
+    WorkerMain --> Queue
     HTTP --> EventSvc
-    HTTP --> SubSvc
-    EventSvc --> EventRepo
-    EventSvc --> SubRepo
-    EventSvc --> DeliveryRepo
+    EventSvc --> Repos
     EventSvc --> Queue
-    SubSvc --> SubRepo
-    EventSvc -.-> Matcher
-
-    EventRepo --> Models
-    SubRepo --> Models
-    DeliveryRepo --> Models
-    Queue --> Models
+    FanoutSvc --> Matcher
+    FanoutSvc --> Delivery
+    FanoutSvc --> Repos
 ```
-
-Solid lines are wired today. Dashed lines (`-.->`) indicate planned connections (worker processing loop, matcher invocation during fanout).
-
-### Package responsibilities
-
-| Package | Responsibility |
-|---------|---------------|
-| `cmd/server` | Boot HTTP server, wire dependencies, graceful shutdown |
-| `cmd/worker` | Boot background processor *(stub)* |
-| `internal/http` | Route registration and request/response handling |
-| `internal/service` | Business logic: ingestion, subscription management, rules matching |
-| `internal/repository` | PostgreSQL CRUD for events, subscriptions, delivery attempts |
-| `internal/queue` | Redis list adapter (`events:queue`) |
-| `internal/config` | Environment variable configuration |
-| `internal/models` | Domain types shared across layers |
 
 ---
 
-## Event Ingestion Flow
-
-**Status: current**
-
-Sequence from client POST to durable storage.
+## Retry Loop
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant Handler as HTTPHandler
-    participant Svc as EventService
-    participant Repo as EventRepository
-    participant DB as PostgreSQL
-
-    Client->>Handler: POST /api/v1/events
-    Handler->>Handler: Validate type and source
-    Handler->>Svc: IngestEvent(request)
-    Svc->>Svc: Generate UUID and timestamp
-    Svc->>Repo: Create(event)
-    Repo->>DB: INSERT INTO events
-    DB-->>Repo: OK
-    Repo-->>Svc: event
-    Svc-->>Handler: event
-    Handler-->>Client: 201 Created + event JSON
+stateDiagram-v2
+    [*] --> pending: Create attempt
+    pending --> success: Webhook 2xx
+    pending --> failed: Webhook 5xx/timeout
+    failed --> pending: Retry scheduled (next_retry_at)
+    failed --> failed: Max retries exceeded
+    pending --> failed: Webhook 4xx (no retry)
+    success --> [*]
 ```
 
-After persistence the handler returns immediately. Enqueueing to Redis and triggering the worker is planned as a follow-on step in the ingestion path.
-
----
-
-## Target Fanout Flow (Planned)
-
-**Status: planned**
-
-How events will be processed and delivered once the worker is implemented.
-
-```mermaid
-sequenceDiagram
-    participant Redis as RedisQueue
-    participant Worker
-    participant Matcher as RulesMatcher
-    participant SubRepo as SubscriptionRepository
-    participant DelRepo as DeliveryRepository
-    participant DB as PostgreSQL
-    participant Webhook as SubscriberWebhook
-
-    Worker->>Redis: Consume event from queue
-    Worker->>SubRepo: List active subscriptions
-    SubRepo->>DB: SELECT subscriptions WHERE active
-    DB-->>SubRepo: subscriptions
-
-    loop For each subscription
-        Worker->>Matcher: Matches(event, subscription)
-        alt Rule matches
-            Worker->>DelRepo: Create delivery_attempt (pending)
-            DelRepo->>DB: INSERT delivery_attempts
-            Worker->>Webhook: POST event payload
-            alt Success (2xx)
-                Worker->>DelRepo: Update status=success
-            else Failure (5xx / timeout)
-                Worker->>DelRepo: Update status=failed, schedule retry
-            end
-        end
-    end
-```
-
-### Retry behavior (planned)
-
-Failed deliveries will use exponential backoff:
-
-```
-delay = BASE_RETRY_DELAY_SECONDS * 2^(attempt - 1)
-```
-
-Capped by `MAX_DELIVERY_RETRIES`. HTTP 4xx responses will not be retried (client error).
-
----
-
-## Subscription Management Flow
-
-**Status: current**
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Handler as HTTPHandler
-    participant Svc as SubscriptionService
-    participant Repo as SubscriptionRepository
-    participant DB as PostgreSQL
-
-    Client->>Handler: POST /api/v1/subscriptions
-    Handler->>Svc: CreateSubscription(request)
-    Svc->>Repo: Create(subscription)
-    Repo->>DB: INSERT INTO subscriptions
-    DB-->>Repo: OK
-    Repo-->>Svc: subscription
-    Svc-->>Handler: subscription
-    Handler-->>Client: 201 Created
-```
-
-Delete operations soft-deactivate subscriptions (`active = false`) rather than removing rows.
+Backoff formula: `BASE_RETRY_DELAY_SECONDS × 2^(attempt-1)`
 
 ---
 
 ## Deployment Topology
 
-**Status: current (Docker Compose), planned (Kubernetes fanout)**
-
-### Local — Docker Compose
+### Local (Docker Compose)
 
 ```mermaid
 flowchart LR
-    subgraph host [DeveloperMachine]
-        subgraph compose [DockerCompose]
-            Server[event_fanout_server :8080]
-            Worker[event_fanout_worker]
-            PG[event_fanout_db :5432]
-            Redis[event_fanout_redis :6379]
-        end
-        Dev[Developer curl/browser]
-    end
-
-    Dev --> Server
-    Server --> PG
-    Server --> Redis
+    Dev[Developer] --> Server[:8080]
+    Server --> PG[(Postgres)]
+    Server --> Redis[(Redis)]
     Worker --> PG
     Worker --> Redis
 ```
 
-Both server and worker are built from the same multi-stage Dockerfile. Postgres runs the init migration on first start.
+### Production (DOKS)
 
-### Kubernetes — Helm (target)
-
-```mermaid
-flowchart TB
-    subgraph k8s [KubernetesCluster]
-        LB[LoadBalancer Service]
-        ServerDep[Server Deployment]
-        WorkerDep[Worker Deployment]
-    end
-
-    subgraph managed [ManagedServices]
-        PG[(PostgreSQL)]
-        Redis[(Redis)]
-    end
-
-    Internet[ClientTraffic] --> LB
-    LB --> ServerDep
-    ServerDep --> PG
-    ServerDep --> Redis
-    WorkerDep --> PG
-    WorkerDep --> Redis
-    WorkerDep --> ExtWebhooks[External Webhooks]
-```
-
-The Helm chart under `helm/eventfanout/` defines server deployment, service, HPA, and service account. Configure `values.yaml` for image registry, resource limits, and ingress.
+See [DOKS Deployment](doks-deployment.md) for managed PostgreSQL, Redis, LoadBalancer, and GitHub Actions deploy pipeline.
 
 ---
 
-## Data Flow Summary
+## Delivery Guarantees
 
-| Stage | Current | Planned |
-|-------|---------|---------|
-| 1. Ingest | Client → Server → PostgreSQL | Same |
-| 2. Enqueue | — | Server → Redis queue |
-| 3. Process | — | Worker reads queue |
-| 4. Match | Matcher exists, not invoked | Worker → RulesMatcher → subscriptions |
-| 5. Deliver | — | Worker → HTTP POST to webhook |
-| 6. Retry | — | Exponential backoff on failure |
-| 7. Audit | Service methods exist | HTTP endpoints + DB query |
+**At-least-once** per matching subscriber. See [README — Delivery Guarantees](../README.md#delivery-guarantees).
 
 ---
 
-## Observability
+## Related
 
-### Logging (current)
-
-Server and worker emit structured JSON logs via zap:
-
-```json
-{"level":"info","caller":"service/event_service.go:56","msg":"event ingested","event_id":"550e8400-e29b-41d4-a716-446655440000"}
-```
-
-Configure verbosity with `LOG_LEVEL` (`debug`, `info`, `warn`, `error`).
-
-### Metrics (planned)
-
-OpenTelemetry integration planned for:
-
-- Event ingestion rate
-- Delivery success/failure rate
-- Retry attempt count
-- Webhook latency (p50/p99)
-- Queue depth
-
-### Audit trail (planned)
-
-Query delivery history via:
-
-- `GET /api/v1/events/{eventId}/audit`
-- `GET /api/v1/subscriptions/{subId}/audit`
-
----
-
-## Design Trade-offs
-
-| Decision | Rationale |
-|----------|-----------|
-| At-least-once delivery | Simpler than exactly-once; subscribers deduplicate by event ID |
-| PostgreSQL as source of truth | Durable ingestion before async processing |
-| Redis for queue | Low-latency decoupling between API and worker |
-| Separate server/worker binaries | Independent scaling and deployment |
-| Soft-delete subscriptions | Preserve audit history for inactive subscriptions |
-
----
-
-## Related Documentation
-
-- [Project Details](project-details.md) — configuration, data model, API reference
-- [Getting Started](getting-started.md) — local setup and walkthrough
+- [Project Details](project-details.md)
+- [Getting Started](getting-started.md)

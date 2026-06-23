@@ -5,7 +5,7 @@ BINARY_SERVER=server
 BINARY_WORKER=worker
 GO=go
 DOCKER_IMAGE=event-fanout-service
-DOCKER_REGISTRY=ghcr.io/your-username
+DOCKER_REGISTRY=ghcr.io/shwetaudacious
 
 help:
 	@echo "Available targets:"
